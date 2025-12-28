@@ -1,1 +1,1 @@
-Implementing reinforcement learning on mecanum wheel.
+Implemented reinforcement learning on mecanum wheel simulation.
