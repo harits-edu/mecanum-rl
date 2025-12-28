@@ -13,6 +13,7 @@ class MecanumEnv(gym.Env):
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32)
         
         # Observation Space: [x, y, theta, target_x, target_y]
+        # Kita tetap menggunakan 5 observasi agar agen fokus pada koordinat
         self.observation_space = spaces.Box(low=-10.0, high=10.0, shape=(5,), dtype=np.float32)
         
         # Koneksi Socket
@@ -34,48 +35,71 @@ class MecanumEnv(gym.Env):
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         sock = self._get_connection()
+        
+        # Mengirim perintah reset ke simulasi C
         sock.sendall("reset".encode())
         
-        # Terima state awal dari C
-        data = sock.recv(1024).decode().split(',')
-        obs = np.array(data, dtype=np.float32)
+        # Terima state awal (C mengirim 6 data, kita ambil 5 untuk observasi)
+        try:
+            raw_data = sock.recv(1024).decode().split(',')
+            # Ambil x, y, theta, target_x, target_y
+            obs = np.array(raw_data[:5], dtype=np.float32)
+        except Exception as e:
+            print(f"Reset Error: {e}")
+            obs = np.zeros(5, dtype=np.float32)
+            
         return obs, {}
 
     def step(self, action):
         sock = self._get_connection()
         
-        # Kirim aksi ke C: "control vx vy omega"
+        # 1. Kirim aksi ke C: "control vx vy omega"
         msg = f"control {action[0]} {action[1]} {action[2]}"
         sock.sendall(msg.encode())
         
-        # Terima state baru setelah aksi dilakukan
+        # 2. Terima state baru (Data: x, y, theta, tx, ty, collision)
         try:
-            data = sock.recv(1024).decode().split(',')
-            obs = np.array(data, dtype=np.float32)
-        except:
+            raw_data = sock.recv(1024).decode().split(',')
+            
+            # Parsing 5 data pertama untuk observasi agen
+            obs = np.array(raw_data[:5], dtype=np.float32)
+            
+            # Parsing data ke-6 untuk status tabrakan (0 atau 1)
+            collision = int(raw_data[5])
+        except Exception as e:
+            # Fallback jika terjadi error pembacaan socket
             obs = np.zeros(5, dtype=np.float32)
+            collision = 0
 
         # --- LOGIKA REWARD (Reward Function) ---
-        # 1. Hitung jarak Euclidean ke target
         current_pos = obs[0:2]
         target_pos = obs[3:5]
         dist = np.linalg.norm(current_pos - target_pos)
         
-        # 2. Reward negatif berdasarkan jarak (semakin dekat, penalti semakin kecil)
+        # A. Reward dasar: Penalti jarak (semakin dekat, penalti semakin kecil)
         reward = -dist * 0.1
         
-        # 3. Bonus jika mencapai target
         terminated = False
-        if dist < 0.2:
-            reward += 100.0
-            terminated = True
-            
-        # 4. Penalti jika keluar batas (misal area simulasi -5 sampai 5)
-        if np.any(np.abs(current_pos) > 4.8):
-            reward -= 50.0
-            terminated = True
-
         truncated = False
+
+        # B. Bonus jika mencapai target
+        if dist < 0.25:
+            reward += 150.0 # Bonus sukses
+            terminated = True
+            print("--- Target Tercapai! ---")
+
+        # C. PENALTI TABRAKAN (Fitur Baru)
+        if collision == 1:
+            reward -= 200.0   # Hukuman berat agar agen menghindari rintangan
+            terminated = True # Episode berakhir karena robot "rusak"
+            print("--- TABRAKAN! Robot Menabrak Rintangan ---")
+            
+        # D. Penalti jika keluar batas simulasi
+        if np.any(np.abs(current_pos) > 4.8):
+            reward -= 100.0
+            terminated = True
+            print("--- Keluar Batas! ---")
+
         return obs, reward, terminated, truncated, {}
 
     def close(self):
